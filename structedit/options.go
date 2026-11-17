@@ -21,17 +21,19 @@ type WidgetFactory func(field *structmodel.FieldBinding, notifyChange func()) tv
 type Option func(*editorConfig)
 
 type editorConfig struct {
-	title       string
-	readOnly    bool
-	app         *tview.Application
-	onSave      func(target any) error
-	onCancel    func()
-	onChange    func()
-	codecs      *structmodel.CodecRegistry
-	enumOptions map[reflect.Type][]string
-	namedWidget map[string]WidgetFactory
-	typeWidget  map[reflect.Type]WidgetFactory
-	validator   func(any) error
+	title         string
+	readOnly      bool
+	app           *tview.Application
+	settingsFile  string
+	overridesFile string
+	onSave        func(target any) error
+	onCancel      func()
+	onChange      func()
+	codecs        *structmodel.CodecRegistry
+	enumOptions   map[reflect.Type][]string
+	namedWidget   map[string]WidgetFactory
+	typeWidget    map[reflect.Type]WidgetFactory
+	validator     func(any) error
 }
 
 func defaultConfig() *editorConfig {
@@ -70,6 +72,22 @@ func WithApp(app *tview.Application) Option {
 func WithOnSave(fn func(target any) error) Option {
 	return func(c *editorConfig) {
 		c.onSave = fn
+	}
+}
+
+// WithSettingsFile writes the full edited settings as JSON to path when Save
+// succeeds, leaving any source YAML file and its comments untouched.
+func WithSettingsFile(path string) Option {
+	return func(c *editorConfig) {
+		c.settingsFile = path
+	}
+}
+
+// WithOverridesFile saves only modified fields as a JSON merge patch to path
+// (merging into any existing overrides at path) when Save succeeds.
+func WithOverridesFile(path string) Option {
+	return func(c *editorConfig) {
+		c.overridesFile = path
 	}
 }
 

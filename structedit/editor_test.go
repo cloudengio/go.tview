@@ -5,6 +5,7 @@
 package structedit_test
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -529,5 +530,64 @@ func TestSplitEditorF6CycleAndContainerAutoStep(t *testing.T) {
 	}
 	if cfg.Container.Child.Host != "a-b" || cfg.List[0] != "x-y" {
 		t.Fatalf("unexpected committed values: %+v", cfg)
+	}
+}
+
+func TestSplitEditorSavesJSONOverridesAndSettings(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	overridesPath := filepath.Join(dir, "overrides.json")
+
+	cfg := testConfig{
+		Host:    "yaml-host",
+		Level:   "info",
+		Enabled: true,
+		Timeout: 5 * time.Second,
+	}
+	ed, err := structedit.New(
+		&cfg,
+		structedit.WithSettingsFile(settingsPath),
+		structedit.WithOverridesFile(overridesPath),
+	)
+	if err != nil {
+		t.Fatalf("structedit.New: %v", err)
+	}
+
+	scr := newTestScreen(t, 120, 35)
+	var focused tview.Primitive
+	setFocus := makeFocusSetter(&focused)
+	setFocus(ed)
+	ed.SetRect(0, 0, 120, 35)
+	ed.Draw(scr)
+
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	for _, ch := range "-edited" {
+		sendKey(ed, setFocus, tcell.KeyRune, ch, tcell.ModNone)
+	}
+	if err := ed.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Re-parse base YAML config (with new Timeout added in YAML) and apply overrides.
+	reloaded := testConfig{
+		Host:    "yaml-host",
+		Level:   "info",
+		Enabled: true,
+		Timeout: 30 * time.Second,
+	}
+	if err := structmodel.ApplyJSONFile(&reloaded, overridesPath); err != nil {
+		t.Fatalf("ApplyJSONFile(overrides): %v", err)
+	}
+	if reloaded.Host != "yaml-host-edited" || reloaded.Timeout != 30*time.Second {
+		t.Fatalf("unexpected reloaded config after overrides: %+v", reloaded)
+	}
+
+	// Apply full settings snapshot onto a fresh zero struct.
+	var full testConfig
+	if err := structmodel.ApplyJSONFile(&full, settingsPath); err != nil {
+		t.Fatalf("ApplyJSONFile(settings): %v", err)
+	}
+	if full.Host != "yaml-host-edited" || full.Timeout != 5*time.Second {
+		t.Fatalf("unexpected full config after settings: %+v", full)
 	}
 }

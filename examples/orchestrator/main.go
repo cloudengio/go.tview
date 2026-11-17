@@ -5,12 +5,15 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"reflect"
 
 	"cloudeng.io/tui/tview/structedit"
+	"cloudeng.io/tui/tview/structmodel"
 	basepool "cloudeng.io/vms/vmspool"
 	"github.com/rivo/tview"
 )
@@ -28,9 +31,26 @@ func editorOptions(app *tview.Application) []structedit.Option {
 }
 
 func main() {
+	overridesFile := flag.String("overrides", "", "JSON file for saving/applying setting overrides over the parsed YAML config")
+	settingsFile := flag.String("settings", "", "JSON file for saving the full settings snapshot")
+	flag.Parse()
+
 	cfg := DefaultConfig()
+	if *overridesFile != "" {
+		if err := structmodel.ApplyJSONFile(&cfg, *overridesFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Fatalf("apply overrides %s: %v", *overridesFile, err)
+		}
+	}
+
 	app := tview.NewApplication()
-	opts := append(editorOptions(app),
+	opts := editorOptions(app)
+	if *overridesFile != "" {
+		opts = append(opts, structedit.WithOverridesFile(*overridesFile))
+	}
+	if *settingsFile != "" {
+		opts = append(opts, structedit.WithSettingsFile(*settingsFile))
+	}
+	opts = append(opts,
 		structedit.WithOnSave(func(_ any) error {
 			app.Stop()
 			return nil

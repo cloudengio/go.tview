@@ -55,16 +55,7 @@ func New(target any, opts ...Option) (*Editor, error) {
 		}
 	}
 
-	docOpts := []structmodel.Option{
-		structmodel.WithCodecs(cfg.codecs),
-		structmodel.WithRootLabel(cfg.title),
-	}
-	for t, enumOpts := range cfg.enumOptions {
-		docOpts = append(docOpts, structmodel.WithEnumOptions(t, enumOpts))
-	}
-	if cfg.validator != nil {
-		docOpts = append(docOpts, structmodel.WithValidator(cfg.validator))
-	}
+	docOpts := buildDocOptions(cfg)
 	doc, err := structmodel.NewDocument(target, docOpts...)
 	if err != nil {
 		return nil, err
@@ -89,17 +80,42 @@ func (e *Editor) Document() *structmodel.Document {
 	return e.doc
 }
 
+func buildDocOptions(cfg *editorConfig) []structmodel.Option {
+	docOpts := []structmodel.Option{
+		structmodel.WithCodecs(cfg.codecs),
+		structmodel.WithRootLabel(cfg.title),
+	}
+	for t, enumOpts := range cfg.enumOptions {
+		docOpts = append(docOpts, structmodel.WithEnumOptions(t, enumOpts))
+	}
+	if cfg.validator != nil {
+		docOpts = append(docOpts, structmodel.WithValidator(cfg.validator))
+	}
+	return docOpts
+}
+
 // Save validates and commits all staged changes back into the target struct,
-// then invokes the WithOnSave callback if configured.
+// writes any configured settings/overrides JSON files, and invokes WithOnSave.
 func (e *Editor) Save() error {
 	if e.cfg.readOnly {
 		return nil
 	}
+	if err := e.doc.Validate(); err != nil {
+		return e.reportSaveError("Validation Error", err)
+	}
+	docOpts := buildDocOptions(e.cfg)
+	if e.cfg.overridesFile != "" {
+		if err := structmodel.SaveOverridesJSONFile(e.cfg.overridesFile, e.target, e.doc.WorkingValue(), docOpts...); err != nil {
+			return e.reportSaveError("Save Failed", err)
+		}
+	}
 	if err := e.doc.Commit(); err != nil {
-		e.currentErr = err
-		e.updateFooter()
-		e.showMessageModal("Validation Error", err.Error(), []string{"OK"}, nil)
-		return err
+		return e.reportSaveError("Validation Error", err)
+	}
+	if e.cfg.settingsFile != "" {
+		if err := structmodel.SaveJSONFile(e.cfg.settingsFile, e.target, docOpts...); err != nil {
+			return e.reportSaveError("Save Failed", err)
+		}
 	}
 	e.currentErr = nil
 	e.refreshTreeLabels()
@@ -107,13 +123,17 @@ func (e *Editor) Save() error {
 	e.updateFooter()
 	if e.cfg.onSave != nil {
 		if err := e.cfg.onSave(e.target); err != nil {
-			e.currentErr = err
-			e.updateFooter()
-			e.showMessageModal("Save Failed", err.Error(), []string{"OK"}, nil)
-			return err
+			return e.reportSaveError("Save Failed", err)
 		}
 	}
 	return nil
+}
+
+func (e *Editor) reportSaveError(title string, err error) error {
+	e.currentErr = err
+	e.updateFooter()
+	e.showMessageModal(title, err.Error(), []string{"OK"}, nil)
+	return err
 }
 
 // Cancel requests cancellation. If unsaved edits exist, a confirmation modal
