@@ -7,174 +7,26 @@ package main
 import (
 	"fmt"
 	"net"
-	"strconv"
-	"strings"
 	"time"
+
+	"cloudeng.io/algo/ratecontrol"
+	"cloudeng.io/cmdutil"
+	"cloudeng.io/cmdutil/cmdyaml"
+	"cloudeng.io/cmdutil/flags"
+	"cloudeng.io/cmdutil/keys"
+	"cloudeng.io/file/crawl/crawlcmd"
+	"cloudeng.io/vms/ociimage"
+	basepool "cloudeng.io/vms/vmspool"
+	"cloudeng.io/webapp/cookies"
+	"cloudeng.io/webapp/webassets"
+	"cloudeng.io/webapp/webauth/jwtutil"
 )
 
-// ByteSize mirrors cmdyaml.ByteSize / cmdtypes.ByteSize (TextMarshaler/TextUnmarshaler).
-type ByteSize int64
-
-func (b ByteSize) MarshalText() ([]byte, error) {
-	const mb = 1_000_000
-	if b > 0 && b%mb == 0 {
-		return fmt.Appendf(nil, "%dMB", b/mb), nil
-	}
-	return []byte(strconv.FormatInt(int64(b), 10)), nil
-}
-
-func (b *ByteSize) UnmarshalText(text []byte) error {
-	s := strings.TrimSpace(string(text))
-	if strings.HasSuffix(strings.ToUpper(s), "MB") {
-		num := strings.TrimSpace(s[:len(s)-2])
-		n, err := strconv.ParseInt(num, 10, 64)
-		if err != nil {
-			return err
-		}
-		*b = ByteSize(n * 1_000_000)
-		return nil
-	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return err
-	}
-	*b = ByteSize(n)
-	return nil
-}
-
-// LogFormat models a flags.Enum[T]-style enum wrapper.
-type LogFormat string
-
-func (LogFormat) EnumValues() map[string]LogFormat {
-	return map[string]LogFormat{
-		"text": "text",
-		"json": "json",
-	}
-}
-
-type Enum[T interface {
-	comparable
-	EnumValues() map[string]T
-}] struct {
-	Value T
-}
-
-func (e Enum[T]) String() string {
-	for k, v := range e.Value.EnumValues() {
-		if v == e.Value {
-			return k
-		}
-	}
-	return fmt.Sprintf("%v", e.Value)
-}
-
-func (e Enum[T]) MarshalText() ([]byte, error) {
-	return []byte(e.String()), nil
-}
-
-func (e *Enum[T]) UnmarshalText(text []byte) error {
-	v, ok := e.Value.EnumValues()[string(text)]
-	if !ok {
-		return fmt.Errorf("invalid enum value %q", string(text))
-	}
-	e.Value = v
-	return nil
-}
-
-// KeychainType mirrors keychain.Type (EnumValues directly on an int enum).
-type KeychainType int
-
-const (
-	KeychainFileBased KeychainType = iota + 1
-	KeychainDataProtectionLocal
-	KeychainICloud
-	KeychainAll
-)
-
-func (KeychainType) EnumValues() map[string]KeychainType {
-	return map[string]KeychainType{
-		"file":                  KeychainFileBased,
-		"data-protection-local": KeychainDataProtectionLocal,
-		"icloud":                KeychainICloud,
-		"all":                   KeychainAll,
-	}
-}
-
-// KeychainAccessibility mirrors keychain.Accessibility.
-type KeychainAccessibility int
-
-const (
-	AccessibleDefault KeychainAccessibility = iota
-	AccessibleWhenUnlocked
-	AccessibleAfterFirstUnlock
-	AccessibleAlways
-)
-
-func (KeychainAccessibility) EnumValues() map[string]KeychainAccessibility {
-	return map[string]KeychainAccessibility{
-		"default":            AccessibleDefault,
-		"when-unlocked":      AccessibleWhenUnlocked,
-		"after-first-unlock": AccessibleAfterFirstUnlock,
-		"always":             AccessibleAlways,
-	}
-}
-
-// StagingBehaviour mirrors vmspool.StagingBehaviour.
-type StagingBehaviour int
-
-const (
-	StagingBehaviourRunning StagingBehaviour = iota
-	StagingBehaviourSuspended
-	StagingBehaviourStopped
-)
-
-func (StagingBehaviour) EnumValues() map[string]StagingBehaviour {
-	return map[string]StagingBehaviour{
-		"Running":   StagingBehaviourRunning,
-		"Suspended": StagingBehaviourSuspended,
-		"Stopped":   StagingBehaviourStopped,
-	}
-}
-
-func (s StagingBehaviour) MarshalText() ([]byte, error) {
-	switch s {
-	case StagingBehaviourRunning:
-		return []byte("Running"), nil
-	case StagingBehaviourSuspended:
-		return []byte("Suspended"), nil
-	case StagingBehaviourStopped:
-		return []byte("Stopped"), nil
-	default:
-		return nil, fmt.Errorf("unknown staging behaviour %d", s)
-	}
-}
-
-func (s *StagingBehaviour) UnmarshalText(b []byte) error {
-	switch strings.ToLower(strings.TrimSpace(string(b))) {
-	case "running":
-		*s = StagingBehaviourRunning
-	case "suspended":
-		*s = StagingBehaviourSuspended
-	case "stopped":
-		*s = StagingBehaviourStopped
-	default:
-		return fmt.Errorf("unknown StagingBehaviour %q", string(b))
-	}
-	return nil
-}
-
-// BaseLoggingConfig mirrors cmdutil.LoggingConfig.
-type BaseLoggingConfig struct {
-	Level      int             `yaml:"level" doc:"logging level: 0=error, 1=warn, 2=info, 3=debug"`
-	File       string          `yaml:"file" doc:"log file path. If not specified logs are written to stderr."`
-	Format     Enum[LogFormat] `yaml:"format" doc:"log format: text or json"`
-	SourceCode bool            `yaml:"source_code" doc:"include source code file and line number in logs"`
-}
-
+// LoggingConfig matches orchestrator.LoggingConfig using cloudeng.io/cmdutil.
 type LoggingConfig struct {
-	BaseLoggingConfig `yaml:",inline"`
-	MaxSize           ByteSize `yaml:"max_size" doc:"maximum size of a log file before it is rotated; defaults to 10MB"`
-	MaxBackups        int      `yaml:"max_backups" doc:"maximum number of rotated log files to retain; defaults to 5"`
+	cmdutil.LoggingConfig `yaml:",inline"`
+	MaxSize               cmdyaml.ByteSize `yaml:"max_size" doc:"maximum size of a log file before it is rotated; defaults to 10MB"`
+	MaxBackups            int              `yaml:"max_backups" doc:"maximum number of rotated log files to retain; defaults to 5"`
 }
 
 type GlobalConfig struct {
@@ -183,11 +35,6 @@ type GlobalConfig struct {
 	CompletionQueueSize         int           `yaml:"completion_queue_size" doc:"maximum number of completion events to retain in memory"`
 	FailedVMRetentionPeriod     time.Duration `yaml:"failed_vm_retention_period" doc:"duration for which failed VMs should be retained before being deleted"`
 	SuccessfulVMRetentionPeriod time.Duration `yaml:"successful_vm_retention_period" doc:"duration for which successful VMs should be retained before being deleted"`
-}
-
-type KeySpec struct {
-	User  string `yaml:"user" doc:"keychain user/account"`
-	KeyID string `yaml:"key_id" doc:"identifier of the key in the key store"`
 }
 
 type GitHubServiceConfig struct {
@@ -262,13 +109,51 @@ func (rc RepositoryConfig) Validate() error {
 	return nil
 }
 
+// KeychainType demonstrates flags.Enum[T] from cloudeng.io/cmdutil/flags.
+type KeychainType int
+
+const (
+	KeychainFileBased KeychainType = iota + 1
+	KeychainDataProtectionLocal
+	KeychainICloud
+	KeychainAll
+)
+
+func (KeychainType) EnumValues() map[string]KeychainType {
+	return map[string]KeychainType{
+		"file":                  KeychainFileBased,
+		"data-protection-local": KeychainDataProtectionLocal,
+		"icloud":                KeychainICloud,
+		"all":                   KeychainAll,
+	}
+}
+
+// KeychainAccessibility demonstrates a bare EnumValues type.
+type KeychainAccessibility int
+
+const (
+	AccessibleDefault KeychainAccessibility = iota
+	AccessibleWhenUnlocked
+	AccessibleAfterFirstUnlock
+	AccessibleAlways
+)
+
+func (KeychainAccessibility) EnumValues() map[string]KeychainAccessibility {
+	return map[string]KeychainAccessibility{
+		"default":            AccessibleDefault,
+		"when-unlocked":      AccessibleWhenUnlocked,
+		"after-first-unlock": AccessibleAfterFirstUnlock,
+		"always":             AccessibleAlways,
+	}
+}
+
 type KeychainPluginConfig struct {
-	Binary        string                `yaml:"plugin_binary" doc:"plugin binary to use"`
-	Type          KeychainType          `yaml:"keychain_type" doc:"the type of keychain to use"`
-	Account       string                `yaml:"account" doc:"account that the keychain item belongs to"`
-	UpdateInPlace bool                  `yaml:"update_in_place" doc:"set to true to update existing item in place"`
-	Accessibility KeychainAccessibility `yaml:"accessibility" doc:"optional accessibility level for the keychain item"`
-	Direct        bool                  `yaml:"-"`
+	Binary        string                   `yaml:"plugin_binary" doc:"plugin binary to use"`
+	Type          flags.Enum[KeychainType] `yaml:"keychain_type" doc:"the type of keychain to use"`
+	Account       string                   `yaml:"account" doc:"account that the keychain item belongs to"`
+	UpdateInPlace bool                     `yaml:"update_in_place" doc:"set to true to update existing item in place"`
+	Accessibility KeychainAccessibility    `yaml:"accessibility" doc:"optional accessibility level for the keychain item"`
+	Direct        bool                     `yaml:"-"`
 }
 
 type ICloudKeychainConfig struct {
@@ -276,62 +161,21 @@ type ICloudKeychainConfig struct {
 	Items                []string `yaml:"items" doc:"list of keychain item names to use for API keys"`
 }
 
-type ExponentialBackoffConfig struct {
-	InitialDelay time.Duration `yaml:"initial_delay" doc:"initial backoff delay"`
-	Steps        int           `yaml:"steps" doc:"maximum number of exponential backoff steps"`
-	StatusCodes  []int         `yaml:"status_codes" doc:"HTTP status codes triggering retry"`
-}
-
-type BasePoolConfig struct {
-	Size                  int                      `yaml:"size" doc:"number of VMs to maintain in the pool"`
-	CleanupTimeout        time.Duration            `yaml:"cleanup_timeout" doc:"timeout for cleaning up VMs"`
-	CreateBackoff         ExponentialBackoffConfig `yaml:"create_backoff" doc:"backoff applied between attempts to create a VM"`
-	StopTimeout           time.Duration            `yaml:"stop_timeout" doc:"timeout for stopping VMs"`
-	StagingBehaviour      StagingBehaviour         `yaml:"staging_behaviour" doc:"staging behaviour for VMs in the pool"`
-	DeleteAcquiredOnClose bool                     `yaml:"delete_acquired_on_close" doc:"controls whether Close deletes acquired VMs"`
-}
-
-type Signer struct {
-	Key    string `yaml:"key" doc:"PEM-encoded cosign public key" tview:"widget=textarea"`
-	Issuer string `yaml:"issuer" doc:"OIDC issuer for keyless verification"`
-	Email  string `yaml:"email" doc:"signer email/subject for keyless verification"`
-}
-
-type VerificationPolicy struct {
-	Signers         []Signer          `yaml:"signers" doc:"trusted signers" tview:"itemlabel=Email"`
-	TransparencyLog bool              `yaml:"require_transparency_log" doc:"require transparency log entry"`
-	Annotations     map[string]string `yaml:"annotations" doc:"required signature annotations"`
-}
-
-type OCISource struct {
-	Image           string              `yaml:"image" doc:"OCI image reference to create VMs from"`
-	PullRemoteOnRun bool                `yaml:"pull_remote_on_run" doc:"pull image from registry before creating each VM"`
-	Insecure        bool                `yaml:"pull_insecure" doc:"allow pulling image without TLS verification"`
-	Concurrency     int                 `yaml:"pull_concurrency" doc:"concurrency used to pull image"`
-	Verify          *VerificationPolicy `yaml:"verify" doc:"optional cosign verification policy"`
-}
-
 type TartVMConfig struct {
-	OS               string                   `yaml:"os" doc:"operating system of the tart VM" tview:"widget=dropdown,options=macos|linux"`
-	StateBackoff     ExponentialBackoffConfig `yaml:"state_backoff" doc:"backoff when polling VM state"`
-	RunBackoff       ExponentialBackoffConfig `yaml:"run_backoff" doc:"backoff when waiting for VM to run"`
-	ForceStopBackoff ExponentialBackoffConfig `yaml:"force_stop_backoff" doc:"backoff when forcefully stopping a VM"`
-	RunOptions       []string                 `yaml:"run_options,flow" doc:"additional options to pass to tart run" tview:"widget=csv"`
-	TartBinary       string                   `yaml:"binary" doc:"path to the tart binary"`
-}
-
-type VMResources struct {
-	CPUs     int      `yaml:"cpus" doc:"virtual CPUs allocated per VM"`
-	Memory   ByteSize `yaml:"memory" doc:"memory allocated per VM"`
-	DiskSize ByteSize `yaml:"disk_size" doc:"disk size allocated per VM"`
+	OS               string                               `yaml:"os" doc:"operating system of the tart VM" tview:"widget=dropdown,options=macos|linux"`
+	StateBackoff     ratecontrol.ExponentialBackoffConfig `yaml:"state_backoff" doc:"backoff when polling VM state"`
+	RunBackoff       ratecontrol.ExponentialBackoffConfig `yaml:"run_backoff" doc:"backoff when waiting for VM to run"`
+	ForceStopBackoff ratecontrol.ExponentialBackoffConfig `yaml:"force_stop_backoff" doc:"backoff when forcefully stopping a VM"`
+	RunOptions       []string                             `yaml:"run_options,flow" doc:"additional options to pass to tart run" tview:"widget=csv"`
+	TartBinary       string                               `yaml:"binary" doc:"path to the tart binary"`
 }
 
 type TartConfig struct {
-	TartVMConfig `yaml:",inline"`
-	OCISource    `yaml:",inline"`
-	VMResources  `yaml:",inline"`
-	RunnerDir    string `yaml:"runner_dir" doc:"directory on the VM in which the runner is installed"`
-	CosignBinary string `yaml:"cosign_binary" doc:"path to cosign binary"`
+	TartVMConfig         `yaml:",inline"`
+	ociimage.Source      `yaml:",inline"`
+	basepool.VMResources `yaml:",inline"`
+	RunnerDir            string `yaml:"runner_dir" doc:"directory on the VM in which the runner is installed"`
+	CosignBinary         string `yaml:"cosign_binary" doc:"path to cosign binary"`
 }
 
 type MockConfig struct {
@@ -340,10 +184,10 @@ type MockConfig struct {
 }
 
 type PoolConfig struct {
-	BasePoolConfig `yaml:",inline"`
-	Tart           *TartConfig `yaml:"tart_config" doc:"configure and select the tart VM backend for this pool"`
-	Mock           *MockConfig `yaml:"mock_config" doc:"configure and select the mock VM backend for this pool"`
-	Backend        any         `yaml:"-"`
+	basepool.Config `yaml:",inline"`
+	Tart            *TartConfig `yaml:"tart_config" doc:"configure and select the tart VM backend for this pool"`
+	Mock            *MockConfig `yaml:"mock_config" doc:"configure and select the mock VM backend for this pool"`
+	Backend         any         `yaml:"-"`
 }
 
 func (p PoolConfig) Validate() error {
@@ -359,62 +203,34 @@ func (p PoolConfig) Validate() error {
 	return nil
 }
 
-type RateControlConfig struct {
-	ExponentialBackoff ExponentialBackoffConfig `yaml:"exponential_backoff" doc:"exponential backoff configuration"`
-}
-
 type WebhookConfig struct {
-	RelayURL    string            `yaml:"relay_url" doc:"the URL to which GitHub will send webhook events"`
-	RateControl RateControlConfig `yaml:"rate_control" doc:"rate control settings for the webhook relay service"`
-	Streaming   bool              `yaml:"streaming" doc:"use the streaming webhook API instead of polling"`
-}
-
-type CookieScopeAndDuration struct {
-	Domain   string        `yaml:"domain" doc:"cookie domain"`
-	Path     string        `yaml:"path" doc:"cookie path"`
-	Duration time.Duration `yaml:"duration" doc:"cookie lifetime"`
-}
-
-type JWTCookieConfig struct {
-	Name                   string `yaml:"name" doc:"name of the authentication cookie"`
-	CookieScopeAndDuration `yaml:",inline"`
-	Insecure               bool `yaml:"insecure" doc:"allow insecure (non-HTTPS) cookie"`
-}
-
-type JWTSignerConfig struct {
-	Issuer   string            `yaml:"jwt_issuer" doc:"jwt issuer"`
-	Audience []string          `yaml:"jwt_audience" doc:"jwt audience" tview:"widget=csv"`
-	Duration time.Duration     `yaml:"jwt_duration" doc:"validity duration of the issued JWT"`
-	Subject  string            `yaml:"jwt_subject" doc:"jwt subject"`
-	Claims   map[string]string `yaml:"jwt_claims" doc:"additional claims to include in issued JWTs"`
-}
-
-type JWTValidatorConfig struct {
-	JWTCookieConfig    `yaml:"cookie" doc:"jwt cookie config"`
-	ValidationTimeSkew time.Duration     `yaml:"validation_time_skew" doc:"allowed time skew for validation"`
-	Issuer             string            `yaml:"jwt_issuer" doc:"expected jwt issuer"`
-	Audience           []string          `yaml:"jwt_audience" doc:"expected jwt audience" tview:"widget=csv"`
-	Subject            string            `yaml:"jwt_subject" doc:"expected jwt subject"`
-	Claims             map[string]string `yaml:"jwt_claims" doc:"additional expected claims"`
-	VerificationKeys   []KeySpec         `yaml:"jwt_verification_keys" doc:"jwt verification key specs" tview:"itemlabel=KeyID"`
+	RelayURL    string               `yaml:"relay_url" doc:"the URL to which GitHub will send webhook events"`
+	RateControl crawlcmd.RateControl `yaml:"rate_control" doc:"rate control settings for the webhook relay service"`
+	Streaming   bool                 `yaml:"streaming" doc:"use the streaming webhook API instead of polling"`
 }
 
 type JWTIssuerConfig struct {
-	JWTCookieConfig `yaml:"cookie" doc:"jwt cookie config"`
-	JWTSignerConfig `yaml:",inline"`
-	SigningKey      KeySpec `yaml:"jwt_signing_key" doc:"jwt signing key spec"`
-	Redirect        string  `yaml:"redirect" doc:"URL to redirect to after setting the cookie"`
+	jwtutil.JWTCookieSignerConfig `yaml:",inline"`
+	SigningKey                    keys.KeySpec `yaml:"jwt_signing_key" doc:"jwt signing key spec"`
+	Redirect                      string       `yaml:"redirect" doc:"URL to redirect to after setting the cookie"`
 }
 
-type WebAssetsConfig struct {
-	ReloadEnabled bool   `yaml:"reload_enabled" doc:"serve web UI assets from local filesystem"`
-	ReloadRoot    string `yaml:"reload_root" doc:"path to webui directory for live reload"`
+func (jc *JWTIssuerConfig) Validate() error {
+	if err := jc.JWTCookieSignerConfig.Validate(); err != nil {
+		return err
+	}
+	return jc.JWTCookieConfig.Validate()
+}
+
+type JWTValidatorConfig struct {
+	jwtutil.JWTCookieValidatorConfig `yaml:",inline"`
+	VerificationKeys                 []keys.KeySpec `yaml:"jwt_verification_keys" doc:"jwt verification key specs" tview:"itemlabel=ID"`
 }
 
 type WebUIConfig struct {
 	Enabled         bool                `yaml:"enabled" doc:"enable the web UI and management API"`
 	ListenAddress   string              `yaml:"listen_address" doc:"address for the web UI/API HTTP server"`
-	Reload          WebAssetsConfig     `yaml:"reload" doc:"local asset reload settings"`
+	Reload          webassets.Config    `yaml:"reload" doc:"serve the web UI assets from the local filesystem"`
 	JWTVerification *JWTValidatorConfig `yaml:"jwt_verifier" doc:"configuration for JWT verification"`
 }
 
@@ -458,9 +274,9 @@ func (cfg Config) Validate() error {
 }
 
 func DefaultConfig() Config {
-	cookie := JWTCookieConfig{
+	cookie := jwtutil.JWTCookieConfig{
 		Name: "github-runner-orchestrator",
-		CookieScopeAndDuration: CookieScopeAndDuration{
+		ScopeAndDuration: cookies.ScopeAndDuration{
 			Domain:   "127.0.0.1",
 			Path:     "/",
 			Duration: 240 * time.Hour,
@@ -488,12 +304,12 @@ func DefaultConfig() Config {
 
 	return Config{
 		Logging: LoggingConfig{
-			BaseLoggingConfig: BaseLoggingConfig{
+			LoggingConfig: cmdutil.LoggingConfig{
 				Level:  2,
 				File:   "-",
-				Format: Enum[LogFormat]{Value: "text"},
+				Format: "text",
 			},
-			MaxSize:    10_000_000,
+			MaxSize:    10 * cmdyaml.MB,
 			MaxBackups: 5,
 		},
 		Global: GlobalConfig{
@@ -505,7 +321,7 @@ func DefaultConfig() Config {
 		},
 		ICloudKeychain: ICloudKeychainConfig{
 			KeychainPluginConfig: KeychainPluginConfig{
-				Type:          KeychainAll,
+				Type:          flags.Enum[KeychainType]{Value: KeychainAll},
 				Accessibility: AccessibleWhenUnlocked,
 			},
 			Items: []string{
@@ -516,35 +332,35 @@ func DefaultConfig() Config {
 		},
 		VMPools: map[string]PoolConfig{
 			"macos": {
-				BasePoolConfig: BasePoolConfig{
+				Config: basepool.Config{
 					Size:                  2,
 					CleanupTimeout:        time.Minute,
 					StopTimeout:           30 * time.Second,
-					StagingBehaviour:      StagingBehaviourRunning,
+					StagingBehaviour:      basepool.StagingBehaviourRunning,
 					DeleteAcquiredOnClose: true,
-					CreateBackoff:         ExponentialBackoffConfig{InitialDelay: 500 * time.Millisecond, Steps: 10},
+					CreateBackoff:         ratecontrol.ExponentialBackoffConfig{InitialDelay: 500 * time.Millisecond, Steps: 10},
 				},
 				Tart: &TartConfig{
 					TartVMConfig: TartVMConfig{
 						OS:         "macos",
 						TartBinary: "/opt/homebrew/bin/tart",
 					},
-					OCISource: OCISource{
+					Source: ociimage.Source{
 						Image:    "mm-1:5001/macos-ci:latest",
 						Insecure: true,
-						Verify: &VerificationPolicy{
-							Signers: []Signer{{Key: "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----", Email: "ci@cloudeng.io"}},
+						Verify: &ociimage.Policy{
+							Signers: []ociimage.Signer{{Key: "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"}},
 						},
 					},
-					VMResources:  VMResources{CPUs: 4, Memory: 8_000_000_000},
+					VMResources:  basepool.VMResources{Cores: 4, MemGiB: 8},
 					RunnerDir:    "/Users/admin/actions-runner",
 					CosignBinary: "/opt/homebrew/bin/cosign",
 				},
 			},
 			"linux": {
-				BasePoolConfig: BasePoolConfig{
+				Config: basepool.Config{
 					Size:                  2,
-					StagingBehaviour:      StagingBehaviourStopped,
+					StagingBehaviour:      basepool.StagingBehaviourStopped,
 					DeleteAcquiredOnClose: true,
 				},
 				Tart: &TartConfig{
@@ -553,7 +369,7 @@ func DefaultConfig() Config {
 						RunOptions: []string{"--no-graphics", "--no-audio", "--nested"},
 						TartBinary: "/opt/homebrew/bin/tart",
 					},
-					OCISource: OCISource{
+					Source: ociimage.Source{
 						Image:    "mm-1:5001/linux-ci:latest",
 						Insecure: true,
 					},
@@ -585,11 +401,13 @@ func DefaultConfig() Config {
 		},
 		Webhook: WebhookConfig{
 			RelayURL: "https://example.invalid:10444/webhooks/github_workflows/relay",
-			RateControl: RateControlConfig{
-				ExponentialBackoff: ExponentialBackoffConfig{
-					InitialDelay: time.Second,
-					Steps:        10,
-					StatusCodes:  []int{429, 502, 503},
+			RateControl: crawlcmd.RateControl{
+				ExponentialBackoff: crawlcmd.ExponentialBackoff{
+					ExponentialBackoffConfig: ratecontrol.ExponentialBackoffConfig{
+						InitialDelay: time.Second,
+						Steps:        10,
+					},
+					StatusCodes: []int{429, 502, 503},
 				},
 			},
 		},
@@ -597,25 +415,31 @@ func DefaultConfig() Config {
 			Enabled:       true,
 			ListenAddress: "127.0.0.1:8089",
 			JWTVerification: &JWTValidatorConfig{
-				JWTCookieConfig:    cookie,
-				ValidationTimeSkew: time.Minute,
-				Issuer:             "github-orchestrator",
-				Audience:           []string{"github-orchestrator"},
-				Subject:            "github-orchestrator",
-				Claims:             map[string]string{"access": "admin"},
-				VerificationKeys:   []KeySpec{{User: "cnicolaou", KeyID: "github-orchestrator-jwt-key"}},
+				JWTCookieValidatorConfig: jwtutil.JWTCookieValidatorConfig{
+					JWTCookieConfig:    cookie,
+					ValidationTimeSkew: time.Minute,
+					JWTValidatorConfig: jwtutil.JWTValidatorConfig{
+						Issuer:   "github-orchestrator",
+						Audience: []string{"github-orchestrator"},
+						Subject:  "github-orchestrator",
+						Claims:   map[string]string{"access": "admin"},
+					},
+				},
+				VerificationKeys: []keys.KeySpec{{User: "cnicolaou", ID: "github-orchestrator-jwt-key"}},
 			},
 		},
 		JWTIssuer: &JWTIssuerConfig{
-			JWTCookieConfig: cookie,
-			JWTSignerConfig: JWTSignerConfig{
-				Issuer:   "github-orchestrator",
-				Audience: []string{"github-orchestrator"},
-				Duration: 24 * time.Hour,
-				Subject:  "github-orchestrator",
-				Claims:   map[string]string{"access": "admin"},
+			JWTCookieSignerConfig: jwtutil.JWTCookieSignerConfig{
+				JWTCookieConfig: cookie,
+				JWTSignerConfig: jwtutil.JWTSignerConfig{
+					Issuer:   "github-orchestrator",
+					Audience: []string{"github-orchestrator"},
+					Duration: 24 * time.Hour,
+					Subject:  "github-orchestrator",
+					Claims:   map[string]string{"access": "admin"},
+				},
 			},
-			SigningKey: KeySpec{User: "cnicolaou", KeyID: "github-orchestrator-jwt-key"},
+			SigningKey: keys.KeySpec{User: "cnicolaou", ID: "github-orchestrator-jwt-key"},
 		},
 	}
 }

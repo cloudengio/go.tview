@@ -30,12 +30,19 @@ type Editor struct {
 	header   *tview.TextView
 	tree     *tview.TreeView
 	detail   *tview.Pages
+	helpView *tview.TextView
 	footer   *tview.TextView
 
-	currentNode   *structmodel.Node
-	currentHelp   string
-	currentErr    error
-	focusDelegate func(tview.Primitive)
+	currentNode    *structmodel.Node
+	activeForm     *tview.Form
+	activeBindings []*structmodel.FieldBinding
+	activeList     tview.Primitive
+	activeItemPane tview.Primitive
+	currentHelp    string
+	currentOptions []string
+	currentMeta    string
+	currentErr     error
+	focusDelegate  func(tview.Primitive)
 }
 
 // New constructs a split-view Editor bound to target, which must be a non-nil
@@ -51,6 +58,9 @@ func New(target any, opts ...Option) (*Editor, error) {
 	docOpts := []structmodel.Option{
 		structmodel.WithCodecs(cfg.codecs),
 		structmodel.WithRootLabel(cfg.title),
+	}
+	for t, enumOpts := range cfg.enumOptions {
+		docOpts = append(docOpts, structmodel.WithEnumOptions(t, enumOpts))
 	}
 	if cfg.validator != nil {
 		docOpts = append(docOpts, structmodel.WithValidator(cfg.validator))
@@ -140,6 +150,13 @@ func (e *Editor) Revert() {
 	e.updateFooter()
 }
 
+// Draw synchronizes the description panel with the currently focused form field
+// before drawing the editor.
+func (e *Editor) Draw(screen tcell.Screen) {
+	e.syncActiveFieldHelp()
+	e.Pages.Draw(screen)
+}
+
 // Focus delegates initial focus to the tree pane (or active modal) and
 // captures the container's focus setter.
 func (e *Editor) Focus(delegate func(p tview.Primitive)) {
@@ -171,9 +188,12 @@ func (e *Editor) InputHandler() func(event *tcell.EventKey, setFocus func(p tvie
 			_ = e.Save()
 			return
 		case tcell.KeyF6:
-			if e.tree.HasFocus() {
+			switch {
+			case e.tree.HasFocus():
 				e.focusDetail()
-			} else {
+			case e.activeList != nil && e.activeList.HasFocus() && e.activeItemPane != nil:
+				e.setFocus(e.activeItemPane)
+			default:
 				e.focusTree()
 			}
 			return
@@ -196,20 +216,31 @@ func (e *Editor) buildLayout() {
 	e.detail = tview.NewPages()
 	e.detail.SetBorder(true).SetTitle(" Fields ")
 
+	e.helpView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetWordWrap(true)
+	e.helpView.SetBorder(true).SetTitle(" Description ")
+
+	rightPane := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(e.detail, 0, 1, false).
+		AddItem(e.helpView, 6, 0, false)
+
 	e.footer = tview.NewTextView().
 		SetDynamicColors(true).
-		SetWrap(true)
+		SetWrap(false)
 
 	split := tview.NewFlex().
 		SetDirection(tview.FlexColumn).
 		AddItem(e.tree, 0, 1, true).
-		AddItem(e.detail, 0, 2, false)
+		AddItem(rightPane, 0, 2, false)
 
 	e.rootFlex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(e.header, 1, 0, false).
 		AddItem(split, 0, 1, true).
-		AddItem(e.footer, 2, 0, false)
+		AddItem(e.footer, 1, 0, false)
 
 	e.AddPage(mainPageName, e.rootFlex, true, true)
 }
@@ -262,31 +293,40 @@ func (e *Editor) updateHeader() {
 		tview.Escape(e.cfg.title), dirtyMark, tview.Escape(path)))
 }
 
-func (e *Editor) updateFooter() {
-	var line1 string
-	switch {
-	case e.currentErr != nil:
-		line1 = fmt.Sprintf(" [red]Error: %s[-]", tview.Escape(e.currentErr.Error()))
-	case e.currentHelp != "":
-		line1 = fmt.Sprintf(" [aqua]%s[-]", tview.Escape(e.currentHelp))
-	case e.currentNode != nil:
-		line1 = fmt.Sprintf(" [gray]%s (%s)[-]",
-			tview.Escape(e.currentNode.Path()),
-			tview.Escape(e.currentNode.TargetTypeName()))
+func (e *Editor) updateHelpView() {
+	var lines []string
+	if e.currentErr != nil {
+		lines = append(lines, fmt.Sprintf("[red]Error: %s[-]", tview.Escape(e.currentErr.Error())))
 	}
+	if e.currentHelp != "" {
+		lines = append(lines, "[aqua]"+tview.Escape(e.currentHelp)+"[-]")
+	}
+	if len(e.currentOptions) > 0 {
+		lines = append(lines, fmt.Sprintf("[yellow]Available values:[-] %s",
+			tview.Escape(strings.Join(e.currentOptions, ", "))))
+	}
+	if e.currentMeta != "" {
+		lines = append(lines, "[gray]"+tview.Escape(e.currentMeta)+"[-]")
+	}
+	e.helpView.SetText(strings.Join(lines, "\n"))
+}
 
+func (e *Editor) updateFooter() {
 	hints := []string{
-		"[yellow]Enter/F6[-] Switch Pane",
+		"[yellow]Tab/Enter[-] Next Pane",
 		"[yellow]Esc[-] Back/Cancel",
+		"[yellow]F6[-] Cycle Panes",
 		"[yellow]Ctrl+S[-] Save",
 	}
 	if e.cfg.readOnly {
 		hints = []string{
-			"[yellow]Enter/F6[-] Switch Pane",
+			"[yellow]Tab/Enter[-] Next Pane",
 			"[yellow]Esc[-] Back/Close",
+			"[yellow]F6[-] Cycle Panes",
 		}
 	}
-	e.footer.SetText(line1 + "\n " + strings.Join(hints, "  |  "))
+	e.footer.SetText(" " + strings.Join(hints, "  |  "))
+	e.updateHelpView()
 }
 
 func (e *Editor) showMessageModal(title, msg string, buttons []string, onDone func(label string)) {

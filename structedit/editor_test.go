@@ -41,15 +41,16 @@ type testConfig struct {
 }
 
 func renderScreenText(screen tcell.SimulationScreen) string {
-	w, h := screen.Size()
+	screen.Show()
+	cells, w, h := screen.GetContents()
 	var sb strings.Builder
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			r, _, _, _ := screen.GetContent(x, y)
-			if r == 0 {
+			runes := cells[y*w+x].Runes
+			if len(runes) == 0 || runes[0] == 0 {
 				sb.WriteByte(' ')
 			} else {
-				sb.WriteRune(r)
+				sb.WriteRune(runes[0])
 			}
 		}
 		sb.WriteByte('\n')
@@ -266,10 +267,8 @@ func TestSplitEditorMapNilPtrAndCycle(t *testing.T) {
 		t.Fatalf("expected map key 'beta' to exist after Save, got %+v", cfg.Backends)
 	}
 
-	// Return to tree, move past alpha & beta to "optional [nil]" and press Enter + Enter on Initialize.
+	// Return to tree, move down once to "optional [nil]" and press Enter + Enter on Initialize.
 	sendKey(ed, setFocus, tcell.KeyEscape, 0, tcell.ModNone)
-	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
-	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
 	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
 	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
 	ed.Draw(scr)
@@ -308,24 +307,37 @@ func (uiEnum) EnumValues() map[string]uiEnum {
 
 func TestSplitEditorEnumDropDown(t *testing.T) {
 	type enumOnly struct {
-		Mode uiEnum `yaml:"mode"`
+		Mode uiEnum `yaml:"mode" doc:"Select execution mode"`
+		Port int    `yaml:"port" doc:"TCP listen port"`
 	}
-	cfg := enumOnly{Mode: uiEnumAlpha}
+	cfg := enumOnly{Mode: uiEnumAlpha, Port: 8080}
 	ed, err := structedit.New(&cfg)
 	if err != nil {
 		t.Fatalf("structedit.New: %v", err)
 	}
-	scr := newTestScreen(t, 80, 20)
+	scr := newTestScreen(t, 100, 28)
 	var focused tview.Primitive
 	setFocus := makeFocusSetter(&focused)
 	setFocus(ed)
-	ed.SetRect(0, 0, 80, 20)
+	ed.SetRect(0, 0, 100, 28)
 	ed.Draw(scr)
-	if out := renderScreenText(scr); !strings.Contains(out, "alpha") {
-		t.Fatalf("expected enum dropdown to display 'alpha', got:\n%s", out)
+	out := renderScreenText(scr)
+	for _, want := range []string{"alpha ▾", "Select execution mode", "Available values: alpha, beta"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected screen to contain %q, got:\n%s", want, out)
+		}
 	}
 	if ed.Document().Dirty() {
 		t.Fatal("expected clean document before user interaction")
+	}
+
+	// Focus form and Tab to Port -> Description panel updates to Port's doc text.
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyTab, 0, tcell.ModNone)
+	ed.Draw(scr)
+	out = renderScreenText(scr)
+	if !strings.Contains(out, "TCP listen port") {
+		t.Fatalf("expected Description to update to 'TCP listen port' on Tab, got:\n%s", out)
 	}
 }
 
@@ -392,5 +404,130 @@ func TestSplitEditorMaskModes(t *testing.T) {
 	ed.Draw(scr)
 	if out = renderScreenText(scr); strings.Contains(out, "reveal-me") {
 		t.Fatalf("expected checkbox toggle to re-hide value, got:\n%s", out)
+	}
+}
+
+func TestSplitEditorThreePaneSliceStepAndEdit(t *testing.T) {
+	type listConfig struct {
+		Routes []testRoute `yaml:"routes" tview:"itemlabel=Name"`
+		Items  []string    `yaml:"items"`
+	}
+	cfg := listConfig{
+		Routes: []testRoute{
+			{Name: "api", Port: 8080},
+			{Name: "admin", Port: 9090},
+		},
+		Items: []string{"one", "two"},
+	}
+	ed, err := structedit.New(&cfg, structedit.WithTitle("Lists"))
+	if err != nil {
+		t.Fatalf("structedit.New: %v", err)
+	}
+
+	scr := newTestScreen(t, 130, 35)
+	var focused tview.Primitive
+	setFocus := makeFocusSetter(&focused)
+	setFocus(ed)
+	ed.SetRect(0, 0, 130, 35)
+	ed.Draw(scr)
+
+	// Move down to "routes [2]" and press Enter to focus middle Items table.
+	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	ed.Draw(scr)
+	out := renderScreenText(scr)
+	for _, want := range []string{"Item [0]", "8080", "Add", "Del"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected 3-pane slice view to show %q, got:\n%s", want, out)
+		}
+	}
+
+	// Step Down in Items -> right item pane immediately switches to Item [1] (9090).
+	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
+	ed.Draw(scr)
+	out = renderScreenText(scr)
+	if !strings.Contains(out, "Item [1]") || !strings.Contains(out, "9090") {
+		t.Fatalf("expected stepping Down to update detail pane to Item [1] (9090), got:\n%s", out)
+	}
+
+	// Press Enter -> edit Name of Item [1], Esc back to Items, press 'd' to delete Item [1].
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	for _, ch := range "-v2" {
+		sendKey(ed, setFocus, tcell.KeyRune, ch, tcell.ModNone)
+	}
+	sendKey(ed, setFocus, tcell.KeyEscape, 0, tcell.ModNone)
+	ed.Draw(scr)
+	if out = renderScreenText(scr); !strings.Contains(out, "admin-v2") {
+		t.Fatalf("expected Items table summary to update live to 'admin-v2', got:\n%s", out)
+	}
+
+	// Return to tree, move down to "items [2]" ([]string) and edit Item [0] directly.
+	sendKey(ed, setFocus, tcell.KeyEscape, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyEnter, 0, tcell.ModNone)
+	for _, ch := range "-edited" {
+		sendKey(ed, setFocus, tcell.KeyRune, ch, tcell.ModNone)
+	}
+	if err := ed.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if cfg.Routes[1].Name != "admin-v2" || cfg.Items[0] != "one-edited" {
+		t.Fatalf("unexpected committed list config: %+v", cfg)
+	}
+}
+
+func TestSplitEditorF6CycleAndContainerAutoStep(t *testing.T) {
+	type inner struct {
+		Host string `yaml:"host"`
+	}
+	type wrapper struct {
+		Child inner `yaml:"child"`
+	}
+	type rootCfg struct {
+		Container wrapper  `yaml:"container"`
+		List      []string `yaml:"list"`
+	}
+	cfg := rootCfg{
+		Container: wrapper{Child: inner{Host: "a"}},
+		List:      []string{"x"},
+	}
+	ed, err := structedit.New(&cfg)
+	if err != nil {
+		t.Fatalf("structedit.New: %v", err)
+	}
+
+	scr := newTestScreen(t, 120, 30)
+	var focused tview.Primitive
+	setFocus := makeFocusSetter(&focused)
+	setFocus(ed)
+	ed.SetRect(0, 0, 120, 30)
+	ed.Draw(scr)
+
+	// Move to "container" (0 scalar fields) -> Tab steps into "child" in tree, Tab again enters child's form.
+	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyTab, 0, tcell.ModNone)
+	ed.Draw(scr)
+	if out := renderScreenText(scr); !strings.Contains(out, "host") {
+		t.Fatalf("expected auto-step into child struct showing 'host', got:\n%s", out)
+	}
+	sendKey(ed, setFocus, tcell.KeyTab, 0, tcell.ModNone)
+	for _, ch := range "-b" {
+		sendKey(ed, setFocus, tcell.KeyRune, ch, tcell.ModNone)
+	}
+
+	// Return to tree (Esc), move to "list [1]", test F6 3-pane cycle: Tree -> Items -> Item [0] -> Tree.
+	sendKey(ed, setFocus, tcell.KeyEscape, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyDown, 0, tcell.ModNone)
+	sendKey(ed, setFocus, tcell.KeyF6, 0, tcell.ModNone) // -> Items table
+	sendKey(ed, setFocus, tcell.KeyF6, 0, tcell.ModNone) // -> Item [0] Value input
+	for _, ch := range "-y" {
+		sendKey(ed, setFocus, tcell.KeyRune, ch, tcell.ModNone)
+	}
+	if err := ed.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if cfg.Container.Child.Host != "a-b" || cfg.List[0] != "x-y" {
+		t.Fatalf("unexpected committed values: %+v", cfg)
 	}
 }

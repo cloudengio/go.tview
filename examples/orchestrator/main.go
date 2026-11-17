@@ -8,18 +8,29 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 
 	"cloudeng.io/tui/tview/structedit"
+	basepool "cloudeng.io/vms/vmspool"
 	"github.com/rivo/tview"
 )
+
+func editorOptions(app *tview.Application) []structedit.Option {
+	return []structedit.Option{
+		structedit.WithTitle("GitHub Runner Orchestrator"),
+		structedit.WithApp(app),
+		structedit.WithEnumOptions(reflect.TypeFor[basepool.StagingBehaviour](), []string{
+			"Running",
+			"Suspended",
+			"Stopped",
+		}),
+	}
+}
 
 func main() {
 	cfg := DefaultConfig()
 	app := tview.NewApplication()
-	ed, err := structedit.New(
-		&cfg,
-		structedit.WithTitle("GitHub Runner Orchestrator"),
-		structedit.WithApp(app),
+	opts := append(editorOptions(app),
 		structedit.WithOnSave(func(_ any) error {
 			app.Stop()
 			return nil
@@ -28,6 +39,7 @@ func main() {
 			app.Stop()
 		}),
 	)
+	ed, err := structedit.New(&cfg, opts...)
 	if err != nil {
 		log.Fatal(err)
 	}

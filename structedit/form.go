@@ -20,6 +20,11 @@ const (
 )
 
 func (e *Editor) renderDetail(mn *structmodel.Node) {
+	e.activeForm = nil
+	e.activeBindings = nil
+	e.activeList = nil
+	e.activeItemPane = nil
+
 	var view tview.Primitive
 	switch {
 	case mn.HasCycle():
@@ -80,9 +85,23 @@ func (e *Editor) buildNilPtrView(mn *structmodel.Node) tview.Primitive {
 }
 
 func (e *Editor) buildFormView(mn *structmodel.Node) tview.Primitive {
+	return e.buildNodeForm(mn, func() { e.focusTree() }, nil, nil)
+}
+
+func (e *Editor) buildNodeForm(mn *structmodel.Node, onCancel func(), onEdited func(), onOpenInTree func()) tview.Primitive {
 	fields := mn.ScalarFields()
 	form := tview.NewForm()
-	form.SetCancelFunc(func() { e.focusTree() })
+	form.SetCancelFunc(func() {
+		idx, _ := form.GetFocusedItemIndex()
+		if idx >= 0 && idx < form.GetFormItemCount() {
+			if dd, ok := form.GetFormItem(idx).(*tview.DropDown); ok && dd.IsOpen() {
+				return
+			}
+		}
+		if onCancel != nil {
+			onCancel()
+		}
+	})
 
 	if len(fields) == 0 {
 		msg := "No scalar fields on this node. Use the Structure tree to edit child sections."
@@ -94,23 +113,26 @@ func (e *Editor) buildFormView(mn *structmodel.Node) tview.Primitive {
 
 	var itemBindings []*structmodel.FieldBinding
 	for _, fb := range fields {
-		items := e.buildFormItems(fb)
+		items := e.buildFormItems(fb, onEdited)
 		for _, item := range items {
 			form.AddFormItem(item)
 			itemBindings = append(itemBindings, fb)
 		}
 	}
 
-	e.addFormActions(form, mn)
-
-	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		e.syncFocusedFieldHelp(form, itemBindings)
-		return event
-	})
+	e.addFormActions(form, mn, onOpenInTree)
+	e.activeForm = form
+	e.activeBindings = itemBindings
+	if len(itemBindings) > 0 {
+		e.setFieldHelp(itemBindings[0])
+	}
 	return form
 }
 
-func (e *Editor) addFormActions(form *tview.Form, mn *structmodel.Node) {
+func (e *Editor) addFormActions(form *tview.Form, mn *structmodel.Node, onOpenInTree func()) {
+	if onOpenInTree != nil && len(mn.Children()) > 0 {
+		form.AddButton("Open Nested Sections", onOpenInTree)
+	}
 	if mn.IsPointer() && !e.cfg.readOnly && !mn.ReadOnly() {
 		form.AddButton("Clear (set nil)", func() {
 			if err := mn.ClearPtr(); err != nil {
@@ -131,102 +153,120 @@ func (e *Editor) addFormActions(form *tview.Form, mn *structmodel.Node) {
 	}
 }
 
-func (e *Editor) syncFocusedFieldHelp(form *tview.Form, bindings []*structmodel.FieldBinding) {
-	idx, _ := form.GetFocusedItemIndex()
-	if idx >= 0 && idx < len(bindings) {
-		fb := bindings[idx]
-		e.currentHelp = formatFieldHelp(fb)
-		e.currentErr = fb.Error()
-		e.updateFooter()
+func (e *Editor) syncActiveFieldHelp() {
+	if e.activeForm == nil || len(e.activeBindings) == 0 {
+		return
+	}
+	if !e.activeForm.HasFocus() && e.currentNode != nil && e.currentNode.Tag().Help != "" {
+		return
+	}
+	idx, btn := e.activeForm.GetFocusedItemIndex()
+	if idx >= 0 && idx < len(e.activeBindings) {
+		e.setFieldHelp(e.activeBindings[idx])
+		e.updateHelpView()
+		return
+	}
+	if btn >= 0 && e.currentNode != nil {
+		e.currentHelp = e.currentNode.Tag().Help
+		e.currentOptions = nil
+		e.currentMeta = fmt.Sprintf("%s (%s)", e.currentNode.Path(), e.currentNode.TargetTypeName())
+		e.currentErr = nil
+		e.updateHelpView()
 	}
 }
 
-func formatFieldHelp(fb *structmodel.FieldBinding) string {
+func (e *Editor) setFieldHelp(fb *structmodel.FieldBinding) {
 	tag := fb.Tag()
-	base := fmt.Sprintf("key: %s (%s)", tag.Name, fb.Type())
-	if tag.Help != "" {
-		base = fmt.Sprintf("%s (key: %s)", tag.Help, tag.Name)
-	}
+	e.currentHelp = tag.Help
+	e.currentOptions = tag.Options
+	meta := fmt.Sprintf("key: %s (%s)", tag.Name, fb.Type())
 	if tag.Mask == structtag.MaskHideWithShow {
-		return base + " [Ctrl+R or checkbox to show/hide]"
+		meta += " [Ctrl+R or checkbox to show/hide]"
 	}
-	return base
+	e.currentMeta = meta
+	e.currentErr = fb.Error()
 }
 
-func (e *Editor) buildFormItems(fb *structmodel.FieldBinding) []tview.FormItem {
+func (e *Editor) buildFormItems(fb *structmodel.FieldBinding, onEdited func()) []tview.FormItem {
 	tag := fb.Tag()
 	disabled := e.cfg.readOnly || fb.ReadOnly()
+	notify := func(err error) {
+		e.onFieldEdited(fb, err)
+		if onEdited != nil {
+			onEdited()
+		}
+	}
 
 	if factory, ok := e.cfg.namedWidget[tag.Widget]; ok {
-		item := factory(fb, func() { e.onFieldEdited(fb, nil) })
+		item := factory(fb, func() { notify(nil) })
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 	if factory, ok := e.cfg.typeWidget[fb.Type()]; ok {
-		item := factory(fb, func() { e.onFieldEdited(fb, nil) })
+		item := factory(fb, func() { notify(nil) })
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 
 	if len(tag.Options) > 0 || tag.Widget == "dropdown" {
-		item := e.buildDropDownItem(fb)
+		item := e.buildDropDownItem(fb, notify)
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 	if fb.ScalarKind() == structmodel.ScalarBool && tag.Widget == "" {
-		item := e.buildCheckboxItem(fb)
+		item := e.buildCheckboxItem(fb, notify)
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 	if tag.Widget == "textarea" || (fb.IsSliceString() && tag.Widget == "lines") {
-		item := e.buildTextAreaItem(fb)
+		item := e.buildTextAreaItem(fb, notify)
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 
 	switch tag.Mask {
 	case structtag.MaskAlwaysHide:
-		item := e.buildAlwaysHiddenItem(fb, disabled)
+		item := e.buildAlwaysHiddenItem(fb, disabled, notify)
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	case structtag.MaskHideWithShow:
-		return e.buildHideWithShowItems(fb, disabled)
+		return e.buildHideWithShowItems(fb, disabled, notify)
 	default:
-		item := e.buildInputItem(fb)
+		item := e.buildInputItem(fb, notify)
 		item.SetDisabled(disabled)
 		return []tview.FormItem{item}
 	}
 }
 
-func (e *Editor) buildCheckboxItem(fb *structmodel.FieldBinding) tview.FormItem {
+func (e *Editor) buildCheckboxItem(fb *structmodel.FieldBinding, notify func(error)) tview.FormItem {
 	cb := tview.NewCheckbox().
 		SetLabel(fb.Tag().Label).
 		SetChecked(fb.Bool())
 	cb.SetChangedFunc(func(checked bool) {
-		err := fb.SetBool(checked)
-		e.onFieldEdited(fb, err)
+		notify(fb.SetBool(checked))
 	})
 	return cb
 }
 
-func (e *Editor) buildDropDownItem(fb *structmodel.FieldBinding) tview.FormItem {
+func (e *Editor) buildDropDownItem(fb *structmodel.FieldBinding, notify func(error)) tview.FormItem {
 	opts := fb.Tag().Options
 	curVal := fb.String()
 	initial := slices.Index(opts, curVal)
 	dd := tview.NewDropDown().
 		SetLabel(fb.Tag().Label).
+		SetUseStyleTags(false).
+		SetTextOptions(" ", " ", "", " ▾", "(select)").
 		SetOptions(opts, nil)
 	if initial >= 0 {
 		dd.SetCurrentOption(initial)
 	}
 	dd.SetSelectedFunc(func(text string, _ int) {
-		err := fb.SetString(text)
-		e.onFieldEdited(fb, err)
+		notify(fb.SetString(text))
 	})
 	return dd
 }
 
-func (e *Editor) buildTextAreaItem(fb *structmodel.FieldBinding) tview.FormItem {
+func (e *Editor) buildTextAreaItem(fb *structmodel.FieldBinding, notify func(error)) tview.FormItem {
 	ta := tview.NewTextArea().
 		SetLabel(fb.Tag().Label).
 		SetText(fb.String(), false).
@@ -235,13 +275,12 @@ func (e *Editor) buildTextAreaItem(fb *structmodel.FieldBinding) tview.FormItem 
 		ta.SetPlaceholder(ph)
 	}
 	ta.SetChangedFunc(func() {
-		err := fb.SetString(ta.GetText())
-		e.onFieldEdited(fb, err)
+		notify(fb.SetString(ta.GetText()))
 	})
 	return ta
 }
 
-func (e *Editor) buildInputItem(fb *structmodel.FieldBinding) tview.FormItem {
+func (e *Editor) buildInputItem(fb *structmodel.FieldBinding, notify func(error)) tview.FormItem {
 	tag := fb.Tag()
 	in := tview.NewInputField().
 		SetLabel(tag.Label).
@@ -251,8 +290,7 @@ func (e *Editor) buildInputItem(fb *structmodel.FieldBinding) tview.FormItem {
 		in.SetPlaceholder(tag.Placeholder)
 	}
 	in.SetChangedFunc(func(text string) {
-		err := fb.SetString(text)
-		e.onFieldEdited(fb, err)
+		notify(fb.SetString(text))
 	})
 	return in
 }
@@ -269,7 +307,7 @@ func (a *alwaysHiddenInput) Blur() {
 	}
 }
 
-func (e *Editor) buildAlwaysHiddenItem(fb *structmodel.FieldBinding, disabled bool) tview.FormItem {
+func (e *Editor) buildAlwaysHiddenItem(fb *structmodel.FieldBinding, disabled bool, notify func(error)) tview.FormItem {
 	tag := fb.Tag()
 	in := tview.NewInputField().
 		SetLabel(tag.Label).
@@ -290,8 +328,7 @@ func (e *Editor) buildAlwaysHiddenItem(fb *structmodel.FieldBinding, disabled bo
 		if suppress || !editing {
 			return
 		}
-		err := fb.SetString(text)
-		e.onFieldEdited(fb, err)
+		notify(fb.SetString(text))
 	})
 	in.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if disabled || editing {
@@ -317,7 +354,7 @@ func (e *Editor) buildAlwaysHiddenItem(fb *structmodel.FieldBinding, disabled bo
 	}
 }
 
-func (e *Editor) buildHideWithShowItems(fb *structmodel.FieldBinding, disabled bool) []tview.FormItem {
+func (e *Editor) buildHideWithShowItems(fb *structmodel.FieldBinding, disabled bool, notify func(error)) []tview.FormItem {
 	tag := fb.Tag()
 	in := tview.NewInputField().
 		SetLabel(tag.Label).
@@ -329,8 +366,7 @@ func (e *Editor) buildHideWithShowItems(fb *structmodel.FieldBinding, disabled b
 	}
 	in.SetDisabled(disabled)
 	in.SetChangedFunc(func(text string) {
-		err := fb.SetString(text)
-		e.onFieldEdited(fb, err)
+		notify(fb.SetString(text))
 	})
 
 	revealed := false
@@ -367,7 +403,7 @@ func (e *Editor) buildHideWithShowItems(fb *structmodel.FieldBinding, disabled b
 }
 
 func (e *Editor) onFieldEdited(fb *structmodel.FieldBinding, err error) {
-	e.currentHelp = formatFieldHelp(fb)
+	e.setFieldHelp(fb)
 	e.currentErr = err
 	e.notifyChange()
 }

@@ -478,3 +478,45 @@ func TestEnumExtractionAndCodecs(t *testing.T) {
 		t.Fatalf("unexpected committed enums: %+v", cfg)
 	}
 }
+
+type sampleFlagVal struct {
+	raw string
+}
+
+func (s *sampleFlagVal) String() string { return s.raw }
+
+func (s *sampleFlagVal) Set(v string) error {
+	if v == "bad" {
+		return errors.New("bad flag value")
+	}
+	s.raw = v
+	return nil
+}
+
+func TestFlagValueCodecAndFuncSkip(t *testing.T) {
+	type cfg struct {
+		Flag     sampleFlagVal `yaml:"flag"`
+		Callback func(string)  `yaml:"callback"`
+	}
+	c := cfg{Flag: sampleFlagVal{raw: "init"}}
+	doc, err := structmodel.NewDocument(&c)
+	if err != nil {
+		t.Fatalf("NewDocument: %v", err)
+	}
+	fields := doc.Root().ScalarFields()
+	if len(fields) != 1 || fields[0].Tag().Name != "flag" {
+		t.Fatalf("expected only 'flag' field, got %v", fields)
+	}
+	if err := fields[0].SetString("bad"); err == nil {
+		t.Fatal("expected flag.Value Set error")
+	}
+	if err := fields[0].SetString("ok"); err != nil {
+		t.Fatalf("SetString ok: %v", err)
+	}
+	if err := doc.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if c.Flag.raw != "ok" {
+		t.Fatalf("expected committed flag 'ok', got %q", c.Flag.raw)
+	}
+}

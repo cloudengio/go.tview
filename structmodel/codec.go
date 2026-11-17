@@ -9,6 +9,7 @@ package structmodel
 
 import (
 	"encoding"
+	"flag"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -28,6 +29,7 @@ const (
 	ScalarFloat
 	ScalarDuration
 	ScalarText
+	ScalarFlag
 	ScalarEnum
 	ScalarCustom
 )
@@ -70,6 +72,9 @@ func (r *CodecRegistry) Classify(t reflect.Type) (ScalarKind, bool) {
 	if isTextCodecType(t) {
 		return ScalarText, true
 	}
+	if isFlagValueCodecType(t) {
+		return ScalarFlag, true
+	}
 	if hasEnumValuesMethod(t) {
 		return ScalarEnum, true
 	}
@@ -92,6 +97,9 @@ func (r *CodecRegistry) Format(v reflect.Value) (string, error) {
 	}
 	if s, ok, err := formatTextMarshaler(v); ok {
 		return s, err
+	}
+	if s, ok := formatFlagValue(v); ok {
+		return s, nil
 	}
 	if s, ok, err := formatEnumValue(v); ok {
 		return s, err
@@ -116,6 +124,9 @@ func (r *CodecRegistry) Parse(t reflect.Type, text string) (reflect.Value, error
 		return out, nil
 	}
 	if v, ok, err := parseTextUnmarshaler(t, text); ok {
+		return v, err
+	}
+	if v, ok, err := parseFlagValue(t, text); ok {
 		return v, err
 	}
 	if v, ok, err := parseEnumValue(t, text); ok {
@@ -144,7 +155,48 @@ func classifyPrimitive(t reflect.Type) (ScalarKind, bool) {
 var (
 	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
 	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+	flagValueType       = reflect.TypeFor[flag.Value]()
 )
+
+func isFlagValueCodecType(t reflect.Type) bool {
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < t.NumField(); i++ {
+		if t.Field(i).IsExported() {
+			return false
+		}
+	}
+	return reflect.PointerTo(t).Implements(flagValueType)
+}
+
+func formatFlagValue(v reflect.Value) (string, bool) {
+	if !isFlagValueCodecType(v.Type()) {
+		return "", false
+	}
+	ptr := reflect.New(v.Type())
+	ptr.Elem().Set(v)
+	fv, ok := ptr.Interface().(flag.Value)
+	if !ok {
+		return "", false
+	}
+	return fv.String(), true
+}
+
+func parseFlagValue(t reflect.Type, text string) (reflect.Value, bool, error) {
+	if !isFlagValueCodecType(t) {
+		return reflect.Value{}, false, nil
+	}
+	ptr := reflect.New(t)
+	fv, ok := ptr.Interface().(flag.Value)
+	if !ok {
+		return reflect.Value{}, false, nil
+	}
+	if err := fv.Set(text); err != nil {
+		return reflect.Value{}, true, err
+	}
+	return ptr.Elem(), true, nil
+}
 
 func isTextCodecType(t reflect.Type) bool {
 	if t.Kind() == reflect.Pointer {

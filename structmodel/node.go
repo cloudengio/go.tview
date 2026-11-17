@@ -310,16 +310,38 @@ func (n *Node) sliceChildren(ref ValueRef, d *TypeDesc) []*Node {
 	v := ref.Get()
 	out := make([]*Node, 0, v.Len())
 	for i := 0; i < v.Len(); i++ {
-		itemRef := newSliceElemRef(ref, i, d.Elem.Type)
-		lbl := n.formatSliceItemLabel(i, itemRef.Get())
-		itemTag := structtag.Spec{
-			Name:      fmt.Sprintf("[%d]", i),
-			Label:     lbl,
-			ItemLabel: n.tag.ItemLabel,
-		}
-		out = append(out, newChildNode(n, fmt.Sprintf("%s[%d]", n.path, i), lbl, itemTag, d.Elem, itemRef, n.readOnly))
+		out = append(out, n.buildSliceChild(ref, d, i))
 	}
 	return out
+}
+
+// ChildAt returns the structural child Node at index i of a slice or array
+// node, or nil if out of range or elements are scalars.
+func (n *Node) ChildAt(i int) *Node {
+	if n.hasCycle || (n.IsPointer() && n.IsNil()) {
+		return nil
+	}
+	ref := n.effectiveRef()
+	d := n.effectiveDesc()
+	if ref == nil || (d.Kind != KindSlice && d.Kind != KindArray) || !isContainerOrPtr(d.Elem) {
+		return nil
+	}
+	v := ref.Get()
+	if i < 0 || i >= v.Len() {
+		return nil
+	}
+	return n.buildSliceChild(ref, d, i)
+}
+
+func (n *Node) buildSliceChild(ref ValueRef, d *TypeDesc, i int) *Node {
+	itemRef := newSliceElemRef(ref, i, d.Elem.Type)
+	lbl := n.formatSliceItemLabel(i, itemRef.Get())
+	itemTag := structtag.Spec{
+		Name:      fmt.Sprintf("[%d]", i),
+		Label:     lbl,
+		ItemLabel: n.tag.ItemLabel,
+	}
+	return newChildNode(n, fmt.Sprintf("%s[%d]", n.path, i), lbl, itemTag, d.Elem, itemRef, n.readOnly)
 }
 
 func (n *Node) mapChildren(ref ValueRef, d *TypeDesc) []*Node {
@@ -329,15 +351,50 @@ func (n *Node) mapChildren(ref ValueRef, d *TypeDesc) []*Node {
 	entries := n.sortedMapKeys(ref)
 	out := make([]*Node, 0, len(entries))
 	for _, e := range entries {
-		entryRef := newMapEntryRef(ref, e.rawKey, d.Elem.Type)
-		entryTag := structtag.Spec{
-			Name:      e.formatted,
-			Label:     e.formatted,
-			ItemLabel: n.tag.ItemLabel,
-		}
-		out = append(out, newChildNode(n, fmt.Sprintf("%s[%s]", n.path, e.formatted), e.formatted, entryTag, d.Elem, entryRef, n.readOnly))
+		out = append(out, n.buildMapChild(ref, d, e))
 	}
 	return out
+}
+
+// MapChild returns the structural child Node for key of a map node, or nil
+// if absent or values are scalars.
+func (n *Node) MapChild(key string) *Node {
+	if n.hasCycle || (n.IsPointer() && n.IsNil()) {
+		return nil
+	}
+	ref := n.effectiveRef()
+	d := n.effectiveDesc()
+	if ref == nil || d.Kind != KindMap || !isContainerOrPtr(d.Elem) {
+		return nil
+	}
+	rawKey, err := n.doc.schema.Codecs.Parse(d.Key.Type, key)
+	if err != nil {
+		return nil
+	}
+	mp := ref.Get()
+	if !mp.IsValid() || mp.IsNil() || !mp.MapIndex(rawKey).IsValid() {
+		return nil
+	}
+	return n.buildMapChild(ref, d, mapKeyItem{formatted: key, rawKey: rawKey})
+}
+
+func (n *Node) buildMapChild(ref ValueRef, d *TypeDesc, e mapKeyItem) *Node {
+	entryRef := newMapEntryRef(ref, e.rawKey, d.Elem.Type)
+	entryTag := structtag.Spec{
+		Name:      e.formatted,
+		Label:     e.formatted,
+		ItemLabel: n.tag.ItemLabel,
+	}
+	return newChildNode(n, fmt.Sprintf("%s[%s]", n.path, e.formatted), e.formatted, entryTag, d.Elem, entryRef, n.readOnly)
+}
+
+// ElemEnumOptions returns any extracted enum options for slice/array/map elements.
+func (n *Node) ElemEnumOptions() []string {
+	d := n.effectiveDesc()
+	if d.Elem == nil {
+		return nil
+	}
+	return d.Elem.EnumOptions
 }
 
 func isContainerOrPtr(d *TypeDesc) bool {

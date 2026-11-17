@@ -28,9 +28,21 @@ type DefaultInitializer interface {
 type Option func(*docConfig)
 
 type docConfig struct {
-	codecs    *CodecRegistry
-	rootLabel string
-	validator func(any) error
+	codecs        *CodecRegistry
+	enumOverrides map[reflect.Type][]string
+	rootLabel     string
+	validator     func(any) error
+}
+
+// WithEnumOptions registers explicit dropdown options for a scalar/enum type t
+// that does not implement EnumValues or EnumOptionProvider itself.
+func WithEnumOptions(t reflect.Type, options []string) Option {
+	return func(cfg *docConfig) {
+		if cfg.enumOverrides == nil {
+			cfg.enumOverrides = make(map[reflect.Type][]string)
+		}
+		cfg.enumOverrides[t] = append([]string(nil), options...)
+	}
 }
 
 // WithCodec registers a custom scalar Codec for type t.
@@ -102,7 +114,7 @@ func NewDocument(target any, opts ...Option) (*Document, error) {
 		}
 	}
 
-	schema, err := BuildSchema(rv.Type(), cfg.codecs)
+	schema, err := BuildSchemaWithEnums(rv.Type(), cfg.codecs, cfg.enumOverrides)
 	if err != nil {
 		return nil, err
 	}

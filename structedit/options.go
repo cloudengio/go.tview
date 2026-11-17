@@ -28,6 +28,7 @@ type editorConfig struct {
 	onCancel    func()
 	onChange    func()
 	codecs      *structmodel.CodecRegistry
+	enumOptions map[reflect.Type][]string
 	namedWidget map[string]WidgetFactory
 	typeWidget  map[reflect.Type]WidgetFactory
 	validator   func(any) error
@@ -37,6 +38,7 @@ func defaultConfig() *editorConfig {
 	return &editorConfig{
 		title:       "Settings",
 		codecs:      structmodel.NewCodecRegistry(),
+		enumOptions: make(map[reflect.Type][]string),
 		namedWidget: make(map[string]WidgetFactory),
 		typeWidget:  make(map[reflect.Type]WidgetFactory),
 	}
@@ -89,6 +91,14 @@ func WithOnChange(fn func()) Option {
 func WithCodec(t reflect.Type, codec structmodel.Codec) Option {
 	return func(c *editorConfig) {
 		c.codecs.Register(t, codec)
+	}
+}
+
+// WithEnumOptions registers explicit dropdown choices for an external enum or
+// scalar type t that does not implement EnumValues or EnumOptionProvider.
+func WithEnumOptions(t reflect.Type, options []string) Option {
+	return func(c *editorConfig) {
+		c.enumOptions[t] = append([]string(nil), options...)
 	}
 }
 

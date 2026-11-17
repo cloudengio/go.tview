@@ -54,6 +54,12 @@ type Schema struct {
 // BuildSchema reflects on t (which may be a struct or pointer to struct) and
 // builds a cyclic-safe Schema using codecs.
 func BuildSchema(t reflect.Type, codecs *CodecRegistry) (*Schema, error) {
+	return BuildSchemaWithEnums(t, codecs, nil)
+}
+
+// BuildSchemaWithEnums builds a Schema with optional explicit enum option lists
+// for external types that do not implement EnumValues or EnumOptionProvider.
+func BuildSchemaWithEnums(t reflect.Type, codecs *CodecRegistry, enumOverrides map[reflect.Type][]string) (*Schema, error) {
 	if codecs == nil {
 		codecs = NewCodecRegistry()
 	}
@@ -64,8 +70,9 @@ func BuildSchema(t reflect.Type, codecs *CodecRegistry) (*Schema, error) {
 		return nil, fmt.Errorf("expected struct or pointer to struct, got %s", t)
 	}
 	b := &schemaBuilder{
-		codecs: codecs,
-		types:  make(map[reflect.Type]*TypeDesc),
+		codecs:        codecs,
+		enumOverrides: enumOverrides,
+		types:         make(map[reflect.Type]*TypeDesc),
 	}
 	root, err := b.buildType(t)
 	if err != nil {
@@ -75,8 +82,9 @@ func BuildSchema(t reflect.Type, codecs *CodecRegistry) (*Schema, error) {
 }
 
 type schemaBuilder struct {
-	codecs *CodecRegistry
-	types  map[reflect.Type]*TypeDesc
+	codecs        *CodecRegistry
+	enumOverrides map[reflect.Type][]string
+	types         map[reflect.Type]*TypeDesc
 }
 
 func (b *schemaBuilder) buildType(t reflect.Type) (*TypeDesc, error) {
@@ -86,6 +94,11 @@ func (b *schemaBuilder) buildType(t reflect.Type) (*TypeDesc, error) {
 
 	if sk, ok := b.codecs.Classify(t); ok {
 		enumOpts, _ := ExtractEnumOptions(t)
+		if len(enumOpts) == 0 && b.enumOverrides != nil {
+			if ov, ok := b.enumOverrides[t]; ok {
+				enumOpts = copyAndSort(ov)
+			}
+		}
 		desc := &TypeDesc{
 			Kind:        KindScalar,
 			Type:        t,
@@ -158,7 +171,7 @@ func (b *schemaBuilder) buildStructFields(t reflect.Type, inlineStack map[reflec
 		if !sf.IsExported() && !spec.Inline {
 			continue
 		}
-		if spec.Hidden {
+		if spec.Hidden || sf.Type.Kind() == reflect.Func || sf.Type.Kind() == reflect.Chan {
 			continue
 		}
 

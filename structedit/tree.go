@@ -33,43 +33,90 @@ func (e *Editor) initTree() {
 		if !ok {
 			return
 		}
-		if !tn.IsExpanded() && len(mn.Children()) > 0 {
-			tn.SetExpanded(true)
-			e.populateTreeChildren(tn, mn, false)
-		}
-		e.selectModelNode(mn, true)
+		e.enterTreeNode(tn, mn)
 	})
 
 	e.tree.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEscape {
+		switch key {
+		case tcell.KeyEscape:
 			e.Cancel()
+		case tcell.KeyTab:
+			if cur := e.tree.GetCurrentNode(); cur != nil {
+				if mn, ok := cur.GetReference().(*structmodel.Node); ok {
+					e.enterTreeNode(cur, mn)
+				}
+			}
 		}
 	})
 
 	e.tree.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		cur := e.tree.GetCurrentNode()
-		if cur == nil {
-			return event
-		}
-		mn, ok := cur.GetReference().(*structmodel.Node)
-		if !ok {
-			return event
-		}
-		switch event.Key() {
-		case tcell.KeyRight:
-			if !mn.HasCycle() && len(mn.Children()) > 0 {
-				e.populateTreeChildren(cur, mn, false)
-				cur.SetExpanded(true)
-			}
-			return nil
-		case tcell.KeyLeft:
-			if cur.IsExpanded() {
-				cur.SetExpanded(false)
-				return nil
-			}
-		}
-		return event
+		return e.handleTreeKey(event)
 	})
+}
+
+func (e *Editor) handleTreeKey(event *tcell.EventKey) *tcell.EventKey {
+	cur := e.tree.GetCurrentNode()
+	if cur == nil {
+		return event
+	}
+	mn, ok := cur.GetReference().(*structmodel.Node)
+	if !ok {
+		return event
+	}
+	switch event.Key() {
+	case tcell.KeyRight:
+		if !mn.HasCycle() && !isCollectionKind(mn.TargetKind()) && len(mn.Children()) > 0 && !cur.IsExpanded() {
+			e.populateTreeChildren(cur, mn, false)
+			cur.SetExpanded(true)
+			return nil
+		}
+		e.enterTreeNode(cur, mn)
+		return nil
+	case tcell.KeyLeft:
+		if cur.IsExpanded() {
+			cur.SetExpanded(false)
+			return nil
+		}
+	case tcell.KeyRune:
+		if event.Rune() == ' ' && !mn.HasCycle() && len(mn.Children()) > 0 {
+			e.toggleTreeExpand(cur, mn)
+			return nil
+		}
+	}
+	return event
+}
+
+func (e *Editor) toggleTreeExpand(tn *tview.TreeNode, mn *structmodel.Node) {
+	if tn.IsExpanded() {
+		tn.SetExpanded(false)
+		return
+	}
+	e.populateTreeChildren(tn, mn, false)
+	tn.SetExpanded(true)
+}
+
+func isCollectionKind(k structmodel.Kind) bool {
+	return k == structmodel.KindSlice || k == structmodel.KindArray || k == structmodel.KindMap
+}
+
+func (e *Editor) enterTreeNode(tn *tview.TreeNode, mn *structmodel.Node) {
+	// Pure container structs with no scalar fields step straight to their
+	// first child instead of trapping focus on an empty info form.
+	if !mn.HasCycle() && (!mn.IsPointer() || !mn.IsNil()) &&
+		mn.TargetKind() == structmodel.KindStruct &&
+		len(mn.ScalarFields()) == 0 && len(mn.Children()) > 0 {
+		e.populateTreeChildren(tn, mn, false)
+		tn.SetExpanded(true)
+		if children := tn.GetChildren(); len(children) > 0 {
+			first := children[0]
+			e.tree.SetCurrentNode(first)
+			if cm, ok := first.GetReference().(*structmodel.Node); ok {
+				e.selectModelNode(cm, false)
+			}
+		}
+		return
+	}
+	e.selectModelNode(mn, true)
 }
 
 func (e *Editor) makeTreeNode(mn *structmodel.Node) *tview.TreeNode {
@@ -146,6 +193,8 @@ func (e *Editor) navigateToChildPath(targetPath string) {
 func (e *Editor) selectModelNode(mn *structmodel.Node, moveFocus bool) {
 	e.currentNode = mn
 	e.currentHelp = mn.Tag().Help
+	e.currentOptions = nil
+	e.currentMeta = fmt.Sprintf("%s (%s)", mn.Path(), mn.TargetTypeName())
 	e.currentErr = nil
 	e.detail.SetTitle(fmt.Sprintf(" %s ", mn.Label()))
 
