@@ -14,9 +14,7 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-examples/cmdutil/cmdutil
-examples/orchestrator/orchestrator
-examples/settings/settings
+go.tview.code-workspace
 
 *.DS_Store
 .vscode
@@ -32,3 +30,8 @@ code_review.md
 .mcp.json
 CLAUDE.md
 GEMINI.md
+
+examples/cmdutil/cmdutil
+examples/orchestrator/orchestrator
+examples/settings/settings
+
